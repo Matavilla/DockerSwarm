@@ -65,6 +65,9 @@ from subprocess import Popen, PIPE, check_output
 from sys import exit  # pylint: disable=redefined-builtin
 from time import sleep
 
+from docker import *
+from docker.types.services import EndpointSpec, RestartPolicy
+
 from mininet.log import info, error, warn, debug
 from mininet.util import ( quietRun, errRun, errFail, moveIntf, isShellBuiltin,
                            numCores, retry, mountCgroups, BaseString, decode,
@@ -741,6 +744,9 @@ class Docker ( Host ):
         self.dnameprefix = "mn"
         self.dcmd = dcmd if dcmd is not None else "/bin/bash"
         self.dc = None  # pointer to the dict containing 'Id' and 'Warnings' keys of the container
+
+        print(kwargs)
+
         self.dcinfo = None
         self.did = None # Id of running container
         #  let's store our resource limits to have them available through the
@@ -842,6 +848,7 @@ class Docker ( Host ):
             # access cgroups when modifying resource limits.
             cgroup_parent='/docker'
         )
+        print(hc)
 
         if kwargs.get("rm", False):
             container_list = self.dcli.containers(all=True)
@@ -965,7 +972,7 @@ class Docker ( Host ):
         # bash -i: force interactive
         # -s: pass $* to shell, and make process easy to find in ps
         # prompt is set to sentinel chr( 127 )
-        cmd = [ 'docker', 'exec', '-it',  '%s.%s' % ( self.dnameprefix, self.name ), 'env', 'PS1=' + chr( 127 ),
+        cmd = [ 'docker', 'exec', '-it',  '%s' % (self.did), 'env', 'PS1=' + chr( 127 ),
                 'bash', '--norc', '-is', 'mininet:' + self.name ]
         # Spawn a shell subprocess in a pseudo-tty, to disable buffering
         # in the subprocess and insulate it from signals (e.g. SIGINT)
@@ -1030,7 +1037,7 @@ class Docker ( Host ):
         if not self._is_container_running():
             error( "ERROR: Can't connect to Container \'%s\'' for docker host \'%s\'!\n" % (self.did, self.name) )
             return
-        mncmd = ["docker", "exec", "-t", "%s.%s" % (self.dnameprefix, self.name)]
+        mncmd = ["docker", "exec", "-t", "%s" % (self.did)]
         return Host.popen( self, *args, mncmd=mncmd, **kwargs )
 
     def cmd(self, *args, **kwargs ):
@@ -1253,6 +1260,78 @@ class Docker ( Host ):
             error("Problem reading cgroup info: %r\n" % cmd)
             return -1
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class DockerSwarm(Docker):
+    def __init__(self, name, dimage=None, dcmd=None, build_params={}, **kwargs):
+        self.dimage = dimage
+        self.dnameprefix = "SwarmTask"
+        self.dcmd = dcmd if dcmd is not None else "/bin/bash"
+        self.dc = None 
+        self.dcinfo = None
+        self.did = None 
+        defaults = {'cap_add': ['net_admin'], 'numRep': 1}
+        defaults.update(kwargs)
+
+        if 'net_admin' not in defaults['cap_add']:
+            defaults['cap_add'] += ['net_admin']
+
+
+        self.cap_add = defaults['cap_add']
+
+        self.client = docker.from_env()
+        self.dcli = self.client.api
+        self.dcli.leave_swarm(True);
+
+        spec = self.dcli.create_swarm_spec(snapshot_interval=5000, log_entries_for_slow_followers=1200)
+        response = self.dcli.init_swarm(swarm_spec=spec)
+#print(response)
+#print(self.dcli.inspect_swarm())
+#print(self.dcli.nodes())
+
+        self.numRep = defaults["numRep"]
+        self.NameService = self.dnameprefix + "_" + name
+
+        task = docker.types.TaskTemplate(docker.types.ContainerSpec(self.dimage, command=self.dcmd, hostname=name, tty=True, open_stdin=True, cap_add=self.cap_add))
+        response = self.dcli.create_service(task, self.NameService, mode=docker.types.ServiceMode("replicated", self.numRep))
+        self.IDservice = response["ID"];
+#print(self.dcli.inspect_service(self.IDservice))
+
+#print(self.dcli.inspect_swarm())
+#print(self.dcli.nodes())
+#print("\n")
+        sleep(3)
+# print(self.client.containers.list())
+        self.did = self.client.containers.list()[0].id
+        self.dcinfo = self.dcli.inspect_container(self.did)
+#print(self.dcli.inspect_container(self.client.containers.list()[0].id))
+
+
+
+        Host.__init__(self, name, **kwargs)
+
+        self.master = None
+        self.slave = None
+
+    def terminate(self):
+        self.dcli.remove_service(self.IDservice)
+        
+   
 
 class CPULimitedHost( Host ):
 
